@@ -131,9 +131,8 @@ void update_screen(const sdl_t sdl,const config_t config, const chip8_t chip8){
     const uint8_t bg_a = (config.bg >> 0) & 0xFF;
 
     for (uint32_t i = 0; i < sizeof chip8.display; i++){
-        rect.x = i % config.window_width;
-        rect.y = i / config.window_width;
-
+        rect.x = (i % config.window_width) * config.scale_factor;
+        rect.y = (i / config.window_width) * config.scale_factor;
         if (chip8.display[i]){
             SDL_SetRenderDrawColor(sdl.renderer, fg_r, fg_g, fg_b,fg_a);
             SDL_RenderFillRect(sdl.renderer, &rect);
@@ -258,21 +257,30 @@ void print_debug_info(chip8_t *chip8){
 
             }
             break;
+
+        case 0x01:
+            printf("Jump to adress NNN (0x%04X)\n", chip8->inst.NNN);
+            break;
+
         case 0x02:
             *chip8->stack_pt = chip8->PC;
             chip8->PC = chip8->inst.NNN;
             break;
         case 0x06:
-            printf("Set register V%X to NN 0x%04X\n",
+            printf("Set register V%X to NN 0x%02X\n",
             chip8->inst.X , chip8->inst.NN);
+            break;
+        case 0x07:
+            printf("Set register V%X (0x%02X)+= NN (0x%02X), result: 0x%02X\n",
+            chip8->inst.X, chip8->V[chip8->inst.X], chip8->inst.NN, chip8->V[chip8->inst.X] + chip8->inst.NN );
             break;
         case 0x0A:
             printf("Set I to NNN (0x%04X)\n", chip8->inst.NNN);
             break;
         case 0x0D:
-            printf("Draw N (%u) height sprite at V%X (0x%02X), V%X (0x%02)  from memory loc I (0x%04X), Set VF = 1 if any pixels are turned off\n", chip8
+            printf("Draw N (%u) height sprite at V%X (0x%02X), V%X (0x%02X)  from memory loc I (0x%04X), Set VF = 1 if any pixels are turned off\n", chip8
                    ->inst.N, chip8->inst.X, chip8->V[chip8->inst.X], chip8->inst.Y, chip8->V[chip8->inst.Y], chip8->I);
-
+            break;
         default:
             printf("Unimplemented Opcode.\n");
             break;
@@ -314,6 +322,11 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
                 
             }
             break;
+
+        case 0x01:
+            chip8->PC = chip8->inst.NNN;
+            break;
+
         case 0x02:
             *chip8->stack_pt = chip8->PC;
             chip8->PC = chip8->inst.NNN;
@@ -321,6 +334,10 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
 
         case 0x06:
             chip8->V[chip8->inst.X] = chip8->inst.NN;
+            break;
+
+        case 0x07:
+            chip8->V[chip8->inst.X] += chip8->inst.NN;
             break;
 
         case 0x0A:
@@ -337,7 +354,7 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
             chip8->V[0xF] = 0;
 
             for (uint8_t i = 0; i < chip8->inst.N; i++){
-                const uint8_t sprite_data = chip8->ram[chip8->I + 1];
+                const uint8_t sprite_data = chip8->ram[chip8->I + i];
                 X_cord = orig_X;
 
                 for (int j = 7; j >= 0; j--){
