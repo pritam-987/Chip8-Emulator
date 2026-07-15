@@ -15,6 +15,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/types.h>
+#include <wchar.h>
+#include <time.h>
+#include <time.h>
 
 typedef struct{
     SDL_Window *window;
@@ -179,18 +182,60 @@ void handle_input(chip8_t *chip8){
                             chip8->state = RUNNING;
                         }
                         break;
+                    case SDLK_1: chip8->keypad[0x1] = true; break;
+                    case SDLK_2: chip8->keypad[0x2] = true; break;
+                    case SDLK_3: chip8->keypad[0x3] = true; break;
+                    case SDLK_4: chip8->keypad[0xC] = true; break;
+
+                    case SDLK_q: chip8->keypad[0x4] = true; break;
+                    case SDLK_w: chip8->keypad[0x5] = true; break;
+                    case SDLK_e: chip8->keypad[0x6] = true; break;
+                    case SDLK_r: chip8->keypad[0xD] = true; break;
+
+                    case SDLK_a: chip8->keypad[0x7] = true; break;
+                    case SDLK_s: chip8->keypad[0x8] = true; break;
+                    case SDLK_d: chip8->keypad[0x9] = true; break;
+                    case SDLK_f: chip8->keypad[0xE] = true; break;
+
+                    case SDLK_z: chip8->keypad[0xA] = true; break;
+                    case SDLK_x: chip8->keypad[0x0] = true; break;
+                    case SDLK_c: chip8->keypad[0xB] = true; break;
+                    case SDLK_v: chip8->keypad[0xF] = true; break;
+                    default: break;
                 }
                 break;
 
             case SDL_KEYUP:
-                break;
+                switch (event.key.keysym.sym){
+                    case SDLK_1: chip8->keypad[0x1] = false; break;
+                    case SDLK_2: chip8->keypad[0x2] = false; break;
+                    case SDLK_3: chip8->keypad[0x3] = false; break;
+                    case SDLK_4: chip8->keypad[0xC] = false; break;
 
-            default:
+                    case SDLK_q: chip8->keypad[0x4] = false; break;
+                    case SDLK_w: chip8->keypad[0x5] = false; break;
+                    case SDLK_e: chip8->keypad[0x6] = false; break;
+                    case SDLK_r: chip8->keypad[0xD] = false; break;
+
+                    case SDLK_a: chip8->keypad[0x7] = false; break;
+                    case SDLK_s: chip8->keypad[0x8] = false; break;
+                    case SDLK_d: chip8->keypad[0x9] = false; break;
+                    case SDLK_f: chip8->keypad[0xE] = false; break;
+
+                    case SDLK_z: chip8->keypad[0xA] = false; break;
+                    case SDLK_x: chip8->keypad[0x0] = false; break;
+                    case SDLK_c: chip8->keypad[0xB] = false; break;
+                    case SDLK_v: chip8->keypad[0xF] = false; break;
+
+                    default: break;
+                }
                 break;
+            }
         }
+
     }
 
-}
+
 
 //Init chip8 machine
 bool init_chip8(chip8_t *chip8, const char rom_name[]){
@@ -372,13 +417,31 @@ void print_debug_info(chip8_t *chip8){
             printf("Set PC to V0 (0x%02X) + NNN (0x%04X); Result PC = 0x%04X\n",
              chip8->V[0] , chip8->inst.NNN, chip8->V[0] + chip8->inst.NNN);
             break;
+
+        case 0x0C:
+            printf("Set V%X = rand() %% 256 & NN (0x%02X)\n",
+            chip8->inst.X, chip8->inst.NN);
+            break;
         case 0x0D:
             printf("Draw N (%u) height sprite at V%X (0x%02X), V%X (0x%02X)  from memory loc I (0x%04X), Set VF = 1 if any pixels are turned off\n", chip8
                    ->inst.N, chip8->inst.X, chip8->V[chip8->inst.X], chip8->inst.Y, chip8->V[chip8->inst.Y], chip8->I);
             break;
+
+        case 0x0E:
+            if (chip8->inst.NN == 0x9E){
+                printf("Skip next instruction if key in V%X (0x%02X) is pressed; keypad value: %d\n",
+                       chip8->inst.X, chip8->V[chip8->inst.X], chip8->keypad[chip8->V[chip8->inst.X]]);
+            }
+            else if (chip8->inst.NN == 0xA1){
+                printf("Skip next instruction if key in V%X (0x%02X) is not pressed; keypad value: %d\n",
+                       chip8->inst.X, chip8->V[chip8->inst.X], chip8->keypad[chip8->V[chip8->inst.X]]);
+
+            }
+            break;
         default:
             printf("Unimplemented Opcode.\n");
             break;
+
     }
 
 
@@ -514,6 +577,10 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
             chip8->PC = chip8->V[0] + chip8->inst.NNN;
             break;
 
+        case 0x0C:
+            chip8->V[chip8->inst.X] = (rand() % 256) & chip8->inst.NN;
+            break;
+
         case 0x0D:
             uint8_t X_cord = chip8->V[chip8->inst.X] % config.window_width;
             uint8_t Y_cord = chip8->V[chip8->inst.Y] % config.window_height;
@@ -540,10 +607,39 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
 
             }
             break;
+        case 0x0E:
+            if (chip8->inst.NN == 0x9E){
+                if (chip8->keypad[chip8->V[chip8->inst.X]])
+                    chip8->PC += 2;
+            }
+            else if (chip8->inst.NN == 0xA1){
+                if (!chip8->keypad[chip8->V[chip8->inst.X]])
+                    chip8->PC += 2;
+
+            }
+            break;
+        case 0x0F:
+            switch (chip8->inst.NN) {
+            case 0x0A:
+                bool any_key_pressed = false;
+                for (uint8_t i = 0; i < sizeof chip8->keypad; i++){
+                    if (chip8->keypad[i]) {
+                        chip8->V[chip8->inst.X] = i;
+                        break;
+                    }
+                }
+                if (!any_key_pressed) chip8->PC -= 2;
+
+                break;
+            
+            default:
+                break;
+            }
 
         default:
             break;
     }
+
 }
 
 int main(int argc, char **argv){
@@ -567,6 +663,9 @@ int main(int argc, char **argv){
 
     //Init screen clear
     clear_screen(sdl, config);
+
+    //Seed random generator
+    srand(time(NULL));
 
     //Main emulator loop
     while (chip8.state != QUIT){
