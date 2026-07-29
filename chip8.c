@@ -61,6 +61,7 @@ typedef struct {
     uint8_t delay_timer;
     uint8_t sound_timer;
     bool keypad[16];
+    bool key_waiting;
     const char *rom_name;
     instructions_t inst;
 } chip8_t;
@@ -325,8 +326,7 @@ void print_debug_info(chip8_t *chip8){
             break;
 
         case 0x02:
-            *chip8->stack_pt = chip8->PC;
-            chip8->PC = chip8->inst.NNN;
+            printf("Call subroutine at NNN (0x%04X)\n", chip8->inst.NNN);
             break;
         case 0x03:
             printf("Check if V%X (0x%02X) == NN (0x%02X), skip next instruction if true\n", chip8->inst.X, chip8->V[chip8->inst.NN], chip8->inst.NN);
@@ -423,8 +423,8 @@ void print_debug_info(chip8_t *chip8){
             break;
 
         case 0x0B:
-            printf("Set PC to V0 (0x%02X) + NNN (0x%04X); Result PC = 0x%04X\n",
-             chip8->V[0] , chip8->inst.NNN, chip8->V[0] + chip8->inst.NNN);
+            printf("Set PC to V%X (0x%02X) + NNN (0x%04X); Result PC = 0x%04X\n",
+             chip8->inst.X, chip8->V[chip8->inst.X], chip8->inst.NNN, chip8->V[chip8->inst.X] + chip8->inst.NNN);
             break;
 
         case 0x0C:
@@ -495,11 +495,7 @@ void print_debug_info(chip8_t *chip8){
 
 }
 
-#endif /* ifdef DEBUG
-void print_debug_info(chip8_t #chip8){
-
-
-} */
+#endif
 
 void emulate_instructions(chip8_t *chip8, const config_t config){
     chip8->inst.opcode = (chip8->ram[chip8->PC] << 8) | chip8-> ram[chip8->PC +1];
@@ -582,36 +578,40 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
                 chip8->V[chip8->inst.X] ^= chip8->V[chip8->inst.Y];
                 break;
             case 4:
-                //if ((uint16_t)(chip8->V[chip8->inst.X] + chip8->V[chip8->inst.Y]) > 255)
-                //   chip8->V[0xF] = 1;
-                //chip8->V[chip8->inst.X] += chip8->V[chip8->inst.Y];
-                //break;
-                uint16_t sum = chip8->V[chip8->inst.X] + chip8->V[chip8->inst.Y];
-                chip8->V[0xF] = (sum > 0xFF);
-                chip8->V[chip8->inst.X] = sum & 0xFF;
+                {
+                    uint16_t sum = chip8->V[chip8->inst.X] + chip8->V[chip8->inst.Y];
+                    chip8->V[chip8->inst.X] = sum & 0xFF;
+                    chip8->V[0xF] = (sum > 0xFF);
+                }
                 break;
                     
             case 5:
-                //if  (chip8->V[chip8->inst.X] <= chip8->V[chip8->inst.Y])
-                //   chip8->V[0xF] = 1;
-                //chip8->V[chip8->inst.X] -= chip8->V[chip8->inst.Y];
-                chip8->V[0xF] = (chip8->V[chip8->inst.Y]) <= (chip8->V[chip8->inst.X]);
-                chip8->V[chip8->inst.X] -= chip8->V[chip8->inst.Y];
+                {
+                    uint8_t flag = (chip8->V[chip8->inst.Y]) <= (chip8->V[chip8->inst.X]);
+                    chip8->V[chip8->inst.X] -= chip8->V[chip8->inst.Y];
+                    chip8->V[0xF] = flag;
+                }
                 break;
             case 6:
-                chip8->V[0xF] = chip8->V[chip8->inst.X] & 1;
-                chip8->V[chip8->inst.X] >>= 1;
+                {
+                    uint8_t flag = chip8->V[chip8->inst.X] & 1;
+                    chip8->V[chip8->inst.X] >>= 1;
+                    chip8->V[0xF] = flag;
+                }
                 break;
             case 7:
-                //if  (chip8->V[chip8->inst.X] <= chip8->V[chip8->inst.Y])   
-                //   chip8->V[0xF] = 1;
-                //chip8->V[chip8->inst.X] = chip8->V[chip8->inst.Y] - chip8->V[chip8->inst.X];
-                chip8->V[0xF] = (chip8->V[chip8->inst.Y]) >= chip8->V[chip8->inst.X];
-                chip8->V[chip8->inst.X] = chip8->V[chip8->inst.Y] - chip8->V[chip8->inst.X];
+                {
+                    uint8_t flag = (chip8->V[chip8->inst.Y]) >= chip8->V[chip8->inst.X];
+                    chip8->V[chip8->inst.X] = chip8->V[chip8->inst.Y] - chip8->V[chip8->inst.X];
+                    chip8->V[0xF] = flag;
+                }
                 break;
             case 0xE:
-                chip8->V[0xF] = (chip8->V[chip8->inst.X] & 0x80) >> 7;
-                chip8->V[chip8->inst.X] <<= 1;
+                {
+                    uint8_t flag = (chip8->V[chip8->inst.X] & 0x80) >> 7;
+                    chip8->V[chip8->inst.X] <<= 1;
+                    chip8->V[0xF] = flag;
+                }
                 break;
                 
             default:
@@ -634,7 +634,7 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
             break;
 
         case 0x0B:
-            chip8->PC = chip8->V[0] + chip8->inst.NNN;
+            chip8->PC = chip8->V[chip8->inst.X] + chip8->inst.NNN;
             break;
 
         case 0x0C:
@@ -682,14 +682,20 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
             switch (chip8->inst.NN) {
                 case 0x0A:
                     chip8->PC -= 2;
-                    for (uint8_t i = 0; i < sizeof chip8->keypad; i++){
-                        if (chip8->keypad[i]) {
-                            chip8->V[chip8->inst.X] = i;
+                    if (chip8->key_waiting) {
+                        if (!chip8->keypad[chip8->V[chip8->inst.X]]) {
+                            chip8->key_waiting = false;
                             chip8->PC += 2;
-                            break;
+                        }
+                    } else {
+                        for (uint8_t i = 0; i < sizeof chip8->keypad; i++){
+                            if (chip8->keypad[i]) {
+                                chip8->V[chip8->inst.X] = i;
+                                chip8->key_waiting = true;
+                                break;
+                            }
                         }
                     }
-
                     break;
                 case 0x1E:
                     chip8->I += chip8->V[chip8->inst.X];
@@ -724,12 +730,14 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
                     for (uint8_t i = 0; i <= chip8->inst.X; i++){
                         chip8->ram[chip8->I + i] = chip8->V[i];
                     }
+                    chip8->I += chip8->inst.X;
                     break;
 
                 case 0x65:
                     for (uint8_t i = 0; i <= chip8->inst.X; i++){
-                        chip8->V[i] = chip8->ram[chip8->I + i];                      
+                        chip8->V[i] = chip8->ram[chip8->I + i];
                     }
+                    chip8->I += chip8->inst.X;
                     break;
             default:
                 break;
