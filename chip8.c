@@ -77,7 +77,7 @@ bool init_sdl(sdl_t *sdl, const config_t config){
         return false;
     }
     
-    sdl->renderer  = SDL_CreateRenderer(sdl->window, -1, SDL_RENDERER_ACCELERATED);
+    sdl->renderer  = SDL_CreateRenderer(sdl->window, -1, SDL_RENDERER_SOFTWARE);
     if(!sdl->renderer){
         SDL_Log("could not create renderer %s\n", SDL_GetError());
         return false;
@@ -126,6 +126,13 @@ void clear_screen(const sdl_t sdl, const config_t config){
 
 void update_screen(const sdl_t sdl,const config_t config, const chip8_t chip8){
     SDL_Rect rect= {.x = 0, .y = 0, .w = config.scale_factor, .h =config.scale_factor};
+
+    const uint8_t bg_r2 = (config.bg >> 24) & 0xFF;
+    const uint8_t bg_g2 = (config.bg >> 16) & 0xFF;
+    const uint8_t bg_b2 = (config.bg >> 8) & 0xFF;
+    const uint8_t bg_a2 = (config.bg >> 0) & 0xFF;
+    SDL_SetRenderDrawColor(sdl.renderer, bg_r2, bg_g2, bg_b2, bg_a2);
+    SDL_RenderClear(sdl.renderer);
 
     const uint8_t fg_r = (config.fg >> 24) & 0xFF;
     const uint8_t fg_g = (config.fg >> 16) & 0xFF;
@@ -783,7 +790,7 @@ int main(int argc, char **argv){
         //Get time after instructions
         uint64_t after_frame = SDL_GetPerformanceCounter();
 
-        double time_elapsed = (double)((after_frame - before_frame) / 1000) / SDL_GetPerformanceFrequency(); 
+        double time_elapsed = (double)((after_frame - before_frame) * 1000) / SDL_GetPerformanceFrequency(); 
 
         //Delay for 60hz
         SDL_Delay(16.67f > time_elapsed ? 16.67f - time_elapsed : 0);
