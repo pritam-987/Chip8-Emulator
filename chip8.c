@@ -1,3 +1,4 @@
+#include <SDL2/SDL_audio.h>
 #include <SDL2/SDL_error.h>
 #include <SDL2/SDL_events.h>
 #include <SDL2/SDL_keycode.h>
@@ -19,9 +20,12 @@
 #include <time.h>
 #include <time.h>
 
+
 typedef struct{
     SDL_Window *window;
     SDL_Renderer *renderer;
+    SDL_AudioSpec want, have;
+    SDL_AudioDeviceID dev;
 } sdl_t;
 
 typedef enum{
@@ -38,6 +42,10 @@ typedef struct{
     uint32_t scale_factor;
     bool pixel_outlines;
     uint32_t insts_per_sec;
+    uint32_t sq_wave_freq;
+    uint32_t audio_sample_rate;
+    int32_t volume; 
+    float color_lerp_rate;
 }config_t ;
 
 typedef struct{
@@ -53,6 +61,7 @@ typedef struct {
     emu_state_t state;
     uint8_t ram[4096]; 
     bool display[64*32];
+    uint32_t pixel_colors[64*32];
     uint16_t stack[12];
     uint16_t *stack_pt;
     uint8_t V[16];
@@ -64,14 +73,49 @@ typedef struct {
     bool key_waiting;
     const char *rom_name;
     instructions_t inst;
+    bool draw;
 } chip8_t;
 
-bool init_sdl(sdl_t *sdl, const config_t config){
+bool init_chip8(chip8_t *chip8,const config_t config, const char rom_name[]);
+
+uint32_t color_lerp(const uint32_t start_color, uint32_t end_color, float t){
+    const uint8_t s_r = (start_color >> 24) & 0xFF;
+    const uint8_t s_g = (start_color >> 16) & 0xFF;
+    const uint8_t s_b = (start_color >> 8) & 0xFF;
+    const uint8_t s_a = (start_color >> 0) & 0xFF;
+
+    const uint8_t e_r = (end_color >> 24) & 0xFF;
+    const uint8_t e_g = (end_color >> 16) & 0xFF;
+    const uint8_t e_b = (end_color >> 8) & 0xFF;
+    const uint8_t e_a = (end_color >> 0) & 0xFF;
+
+    const uint8_t ret_r = ((1 - t)*s_r) + (t*e_r);
+    const uint8_t ret_g = ((1 - t)*s_g) + (t*e_g);
+    const uint8_t ret_b = ((1 - t)*s_b) + (t*e_b);
+    const uint8_t ret_a = ((1 - t)*s_a) + (t*e_a);
+
+    return (ret_r << 24) | (ret_g << 16) | (ret_b << 8) | ret_a;
+}
+
+void audio_callback(void *userdata, uint8_t *stream, int len){
+    config_t *config = (config_t *)userdata; 
+
+    int16_t *audio_data = (int16_t *)stream;
+    static uint32_t runnin_sample_index = 0;
+    const int32_t sq_wave_period =  config->audio_sample_rate / config->sq_wave_freq;
+    const int32_t half_sq_wave_period = sq_wave_period / 2;
+
+    for (int i = 0; i < len /2; i++){
+         audio_data[i] = ((runnin_sample_index++ / half_sq_wave_period) % 2) ? config->volume : -config-> volume; 
+    }
+}
+
+bool init_sdl(sdl_t *sdl,  config_t *config){
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) != 0){
         SDL_Log("Could not init SDL %s\n", SDL_GetError());
         return false;
     }  
-    sdl->window = SDL_CreateWindow("chip8", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,config.window_width * config.scale_factor, config.window_height * config.scale_factor, SDL_WINDOW_SHOWN);
+    sdl->window = SDL_CreateWindow("chip8", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,config->window_width * config->scale_factor, config->window_height * config->scale_factor, SDL_WINDOW_SHOWN);
 
     if (!sdl->window){
         SDL_Log("Could not start window %s\n", SDL_GetError());
@@ -84,12 +128,34 @@ bool init_sdl(sdl_t *sdl, const config_t config){
         return false;
     }
 
+    //Audio
+    sdl->want = (SDL_AudioSpec){
+        .freq = 44100,
+        .format = AUDIO_S16LSB,
+        .channels = 1,
+        .samples = 4096,
+        .callback = audio_callback,
+        .userdata = config,
+    };
+    sdl->dev = SDL_OpenAudioDevice(NULL, 0, &sdl->want, &sdl->have, 0);
+
+    if (sdl->dev == 0){
+        SDL_Log("Could not get and Audio Device %s\n", SDL_GetError());
+        return false;
+    }
+
+    if ((sdl->want.channels != sdl->have.channels) || (sdl->want.format != sdl->have.format)){
+        SDL_Log("could not get desired auido spec\n");
+        return false;
+    } 
+
     return true;
 }
 
 void final_cleanup(const sdl_t sdl){
     SDL_DestroyRenderer(sdl.renderer);
     SDL_DestroyWindow(sdl.window);
+    SDL_CloseAudioDevice(sdl.dev);
     SDL_Quit();
 
 }
@@ -104,12 +170,22 @@ bool set_config_from_args(config_t *config, int argc, char **argv){
         .scale_factor = 20,
         .pixel_outlines = true,
         .insts_per_sec = 500,
+        .sq_wave_freq = 440,
+        .audio_sample_rate = 44100,
+        .volume = 3000,
+        .color_lerp_rate = 0.7,
+    
     };
 
     //overrides from the argcs
     for (int i = 1; i < argc; i++)
     {
         (void)argv[i];
+
+        if (strncmp(argv[i], "--scale-factor", strlen("--scale-factor")) == 0){
+            i++;
+            config->scale_factor = (uint32_t)strtol(argv[i], NULL, 10);
+        } 
     }
     return true;
 
@@ -125,31 +201,36 @@ void clear_screen(const sdl_t sdl, const config_t config){
 
 }
 
-void update_screen(const sdl_t sdl,const config_t config, const chip8_t chip8){
+void update_screen(const sdl_t sdl,const config_t config,  chip8_t *chip8){
     SDL_Rect rect= {.x = 0, .y = 0, .w = config.scale_factor, .h =config.scale_factor};
 
-    const uint8_t bg_r2 = (config.bg >> 24) & 0xFF;
-    const uint8_t bg_g2 = (config.bg >> 16) & 0xFF;
-    const uint8_t bg_b2 = (config.bg >> 8) & 0xFF;
-    const uint8_t bg_a2 = (config.bg >> 0) & 0xFF;
-    SDL_SetRenderDrawColor(sdl.renderer, bg_r2, bg_g2, bg_b2, bg_a2);
-    SDL_RenderClear(sdl.renderer);
+    // const uint8_t bg_r2 = (config.bg >> 24) & 0xFF;
+    // const uint8_t bg_g2 = (config.bg >> 16) & 0xFF;
+    // const uint8_t bg_b2 = (config.bg >> 8) & 0xFF;
+    // const uint8_t bg_a2 = (config.bg >> 0) & 0xFF;
+    // SDL_SetRenderDrawColor(sdl.renderer, bg_r2, bg_g2, bg_b2, bg_a2);
+    // SDL_RenderClear(sdl.renderer);
 
-    const uint8_t fg_r = (config.fg >> 24) & 0xFF;
-    const uint8_t fg_g = (config.fg >> 16) & 0xFF;
-    const uint8_t fg_b = (config.fg >> 8) & 0xFF;
-    const uint8_t fg_a = (config.fg >> 0) & 0xFF;
 
     const uint8_t bg_r = (config.bg >> 24) & 0xFF;
     const uint8_t bg_g = (config.bg >> 16) & 0xFF;
     const uint8_t bg_b = (config.bg >> 8) & 0xFF;
     const uint8_t bg_a = (config.bg >> 0) & 0xFF;
 
-    for (uint32_t i = 0; i < sizeof chip8.display; i++){
+    for (uint32_t i = 0; i < sizeof chip8->display; i++){
         rect.x = (i % config.window_width) * config.scale_factor;
         rect.y = (i / config.window_width) * config.scale_factor;
-        if (chip8.display[i]){
-            SDL_SetRenderDrawColor(sdl.renderer, fg_r, fg_g, fg_b,fg_a);
+        if (chip8->display[i]){
+
+            if (chip8->pixel_colors[i] != config.fg){
+                chip8->pixel_colors[i] = color_lerp(chip8->pixel_colors[i], config.fg, config.color_lerp_rate); 
+            }
+            const uint8_t r = (chip8->pixel_colors[i] >> 24) & 0xFF;
+            const uint8_t g = (chip8->pixel_colors[i] >> 16) & 0xFF;
+            const uint8_t b = (chip8->pixel_colors[i] >> 8) & 0xFF;
+            const uint8_t a = (chip8->pixel_colors[i] >> 0) & 0xFF;
+
+            SDL_SetRenderDrawColor(sdl.renderer, r, g, b, a);
             SDL_RenderFillRect(sdl.renderer, &rect);
 
         if (config.pixel_outlines){
@@ -159,7 +240,15 @@ void update_screen(const sdl_t sdl,const config_t config, const chip8_t chip8){
             }
 
         }else {
-            SDL_SetRenderDrawColor(sdl.renderer, bg_r, bg_g, bg_b,bg_a);
+            if (chip8->pixel_colors[i] != config.bg){
+                chip8->pixel_colors[i] = color_lerp(chip8->pixel_colors[i], config.bg, config.color_lerp_rate); 
+            }
+            const uint8_t r = (chip8->pixel_colors[i] >> 24) & 0xFF;
+            const uint8_t g = (chip8->pixel_colors[i] >> 16) & 0xFF;
+            const uint8_t b = (chip8->pixel_colors[i] >> 8) & 0xFF;
+            const uint8_t a = (chip8->pixel_colors[i] >> 0) & 0xFF;
+
+            SDL_SetRenderDrawColor(sdl.renderer, r, g, b, a);
             SDL_RenderFillRect(sdl.renderer, &rect);
         
         }
@@ -167,7 +256,7 @@ void update_screen(const sdl_t sdl,const config_t config, const chip8_t chip8){
     SDL_RenderPresent(sdl.renderer);
 }
 
-void handle_input(chip8_t *chip8){
+void handle_input(chip8_t *chip8, config_t *config){
     SDL_Event event;
     
     while (SDL_PollEvent(&event))
@@ -191,7 +280,28 @@ void handle_input(chip8_t *chip8){
                         else{
                             chip8->state = RUNNING;
                         }
+                        return;
+
+                    case SDLK_EQUALS:
+                        init_chip8(chip8, *config, chip8->rom_name);
                         break;
+
+                    case SDLK_j:
+                        if (config->color_lerp_rate > 0.1) config->color_lerp_rate -= 0.1;
+                        break;
+
+                    case SDLK_k:
+                        if (config->color_lerp_rate < 0.1) config->color_lerp_rate += 0.1;
+                        break;
+
+                    case SDLK_o:
+                        if (config->volume > 0) config->volume -= 500;
+                        break;
+
+                    case SDLK_p:
+                        if (config->volume < INT16_MAX) config->volume += 500;
+                        break;
+
                     case SDLK_1: chip8->keypad[0x1] = true; break;
                     case SDLK_2: chip8->keypad[0x2] = true; break;
                     case SDLK_3: chip8->keypad[0x3] = true; break;
@@ -248,7 +358,7 @@ void handle_input(chip8_t *chip8){
 
 
 //Init chip8 machine
-bool init_chip8(chip8_t *chip8, const char rom_name[]){
+bool init_chip8(chip8_t *chip8, const config_t config, const char rom_name[]){
     const uint32_t entry_point = 0x200;
     const uint8_t font[] = {
         
@@ -269,6 +379,9 @@ bool init_chip8(chip8_t *chip8, const char rom_name[]){
         0xF0, 0x80, 0xF0, 0x80, 0xF0,   // E
         0xF0, 0x80, 0xF0, 0x80, 0x80,   // F
     };
+    // initialize entire chip8 machine
+    memset(chip8, 0, sizeof(chip8_t));
+
     //load font
     memcpy(&chip8->ram[0], font, sizeof(font));
 
@@ -301,6 +414,8 @@ bool init_chip8(chip8_t *chip8, const char rom_name[]){
     chip8->PC = entry_point;
     chip8->rom_name = rom_name;
     chip8->stack_pt = &chip8->stack[0];
+    memset(&chip8->pixel_colors[0], config.bg, sizeof(chip8->pixel_colors));
+
     return true;
 }
 
@@ -328,6 +443,7 @@ void print_debug_info(chip8_t *chip8){
         case 0x02:
             printf("Call subroutine at NNN (0x%04X)\n", chip8->inst.NNN);
             break;
+
         case 0x03:
             printf("Check if V%X (0x%02X) == NN (0x%02X), skip next instruction if true\n", chip8->inst.X, chip8->V[chip8->inst.NN], chip8->inst.NN);
             break;
@@ -518,6 +634,7 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
         case 0x00:
             if (chip8->inst.NN == 0xE0){
                 memset(&chip8->display[0], false, sizeof(chip8->display));
+                chip8->draw = true;
 
             }else if (chip8->inst.NN == 0xEE){
                 chip8->PC = *--chip8->stack_pt;
@@ -666,6 +783,7 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
                 if (++Y_cord >= config.window_height) break;
 
             }
+            chip8->draw = true;
             break;
         case 0x0E:
             if (chip8->inst.NN == 0x9E){
@@ -748,11 +866,16 @@ void emulate_instructions(chip8_t *chip8, const config_t config){
 
 }
 
-void update_timers(chip8_t *chip8){
+void update_timers(const sdl_t sdl, chip8_t *chip8){
     if (chip8->delay_timer > 0) chip8->delay_timer--;
     
-    //TODO: Sound timer
-    if (chip8->sound_timer > 0) chip8->sound_timer--;
+    if (chip8->sound_timer > 0) {
+        chip8->sound_timer--;
+        SDL_PauseAudioDevice(sdl.dev, 0);
+    }
+    else{
+        SDL_PauseAudioDevice(sdl.dev, 1);
+    }
      
 }
 
@@ -767,13 +890,13 @@ int main(int argc, char **argv){
     if (!set_config_from_args(&config,  argc, argv)) exit(EXIT_FAILURE);
 
     sdl_t sdl = {0};
-    if (!init_sdl(&sdl, config)){
+    if (!init_sdl(&sdl, &config)){
         exit(EXIT_FAILURE);
     }
     //init chip8 machine
     chip8_t chip8 = {0};
     const char *rom_name = argv[1];
-    if (!init_chip8(&chip8, rom_name)) exit(EXIT_FAILURE);
+    if (!init_chip8(&chip8, config, rom_name)) exit(EXIT_FAILURE);
 
     //Init screen clear
     clear_screen(sdl, config);
@@ -784,7 +907,7 @@ int main(int argc, char **argv){
     //Main emulator loop
     while (chip8.state != QUIT){
         //handle input
-        handle_input(&chip8);
+        handle_input(&chip8, &config);
 
         if (chip8.state == PAUSED) continue;
 
@@ -802,10 +925,15 @@ int main(int argc, char **argv){
 
         //Delay for 60hz
         SDL_Delay(16.67f > time_elapsed ? 16.67f - time_elapsed : 0);
-        //update widnow with changes
-        update_screen(sdl, config, chip8);
+
+        //update_screen(sdl, config, chip8);
+        //update window with changes
+       if (chip8.draw){
+           update_screen(sdl, config, &chip8);
+           chip8.draw = false;
+       }
         //update delay and sound timers 
-        update_timers(&chip8);
+        update_timers(sdl, &chip8);
 
     }
     //Final cleanup
