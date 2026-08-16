@@ -26,7 +26,7 @@ A CHIP8 emulator in C and SDL.
 
 ```bash
     ./chip8 <rom>
-    ```
+```
 ## controls
 - PACE — Pause / Resume
 - Restart
