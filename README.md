@@ -24,7 +24,7 @@ A CHIP8 emulator in C and SDL.
 
 ## Run
 
-````bash
+```bash
     ./chip8 <rom>
     ```
 ## controls
@@ -33,4 +33,4 @@ A CHIP8 emulator in C and SDL.
 - ESC — Quit
 - J/K — Change color lerp rate
 - O/P — Change volume
-````
+
